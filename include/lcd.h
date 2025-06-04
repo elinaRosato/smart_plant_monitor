@@ -74,4 +74,6 @@ void lcd_puts(uint8_t*);
 void lcd_init(void);
 void lcd_init_pinout(void);
 void lcd_clear_row(uint8_t row);
+void lcd_clear_and_home(void);
+void lcd_print_rows(uint8_t* first_row, uint8_t* second_row);
 #endif /* LCD_N_H_ */

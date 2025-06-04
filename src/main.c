@@ -40,34 +40,32 @@
 #define SENSOR_SOIL    1    // ADC1
 
 // Sensor thresholds
-#define SOIL_MIN        50
-#define SOIL_MAX        700
+#define SOIL_MIN        50      // Too dry threshold  
+#define SOIL_MAX        700     // Too wet threshold  
 #define LIGHT_MIN       200     // Too dark threshold  
-#define LIGHT_MAX       1000     // Too bright threshold
-#define TEMP_MAX        30      // Too hot threshold (°C)
+#define LIGHT_MAX       1000    // Too bright threshold
+#define TEMP_MAX        35      // Too hot threshold (°C)
 
-// Timing constants (in timer ticks, 1 tick = 500ms)
-#define DISPLAY_UPDATE_INTERVAL     1   // 500ms - LCD update rate
-#define SENSOR_CYCLE_INTERVAL       8   // 4s - Auto cycle between sensors
-#define DHT_READ_INTERVAL           8   // 4s - DHT11 reading interval
-#define ERROR_CHECK_INTERVAL        4   // 2s - Error checking interval
+// Timing constants (in timer ticks, 1 tick = 1s)
+#define SENSOR_CYCLE_INTERVAL       4   // 4s - Auto cycle between sensors
+#define DHT_READ_INTERVAL           4   // 4s - DHT11 reading interval
+#define ERROR_CHECK_INTERVAL        2   // 2s - Sensor Reading and error checking interval
 
 // Error codes
 typedef enum {
     ERROR_NONE = 0,
-    ERROR_TOO_BRIGHT,
-    ERROR_TOO_HOT, 
-    ERROR_TOO_WET,
-    ERROR_TOO_DRY,
-    ERROR_DHT_FAIL
+    ERROR_TOO_BRIGHT = 1,
+    ERROR_TOO_HOT = 2, 
+    ERROR_TOO_WET = 3,
+    ERROR_TOO_DRY = 4,
 } error_code_t;
 
 // Sensor types
 typedef enum {
-    SENSOR_TYPE_LIGHT = 0,
-    SENSOR_TYPE_DHT,
-    SENSOR_TYPE_SOIL,
-    SENSOR_COUNT
+    SENSOR_TYPE_SOIL = 0,
+    SENSOR_TYPE_DHT = 1,
+    SENSOR_TYPE_LIGHT = 2,
+    SENSOR_COUNT = 3
 } sensor_type_t;
 
 // =============================================================================
@@ -80,15 +78,14 @@ volatile error_code_t current_error = ERROR_NONE;
 volatile uint8_t auto_cycle_enabled = 1;
 
 // Timer counters
-volatile uint8_t display_timer = 0;
 volatile uint8_t cycle_timer = 0;
 volatile uint8_t dht_timer = 0;
 volatile uint8_t error_timer = 0;
 
 // Flags for non-blocking operations
-volatile uint8_t update_display_flag = 0;
 volatile uint8_t check_errors_flag = 0;
 volatile uint8_t read_dht_flag = 0;
+volatile uint8_t update_display_flag = 1;
 
 // Cached sensor data
 struct {
@@ -105,11 +102,21 @@ struct {
 void uart_init(void);
 void uart_putchar(char c);
 void uart_putstring(const char* str);
-void display_soil(void);
-void display_temperature(void);
-void display_light(void);
-void show_selected_sensor(void);
-void update_dht_data(void);
+void uart_print_sensor_data(void);
+void display_error(error_code_t error);
+void display_soil_sensor(void);
+void display_dht11_sensor(void);
+void display_light_sensor(void);
+void read_adc_sensors(void);
+void read_dht11_sensor(void);
+void check_sensor_errors(void);
+void update_led_and_buzzer(void);
+void buzzer_beep(void);
+void update_display(void);
+void timer1_init(void);
+void gpio_init(void);
+void interrupts_init(void);
+void system_init(void);
 
 // =============================================================================
 // UART COMMUNICATION FUNCTIONS
@@ -158,22 +165,13 @@ void uart_print_sensor_data(void) {
 
 void timer1_init(void) {
     TCCR1B  = (1<<WGM12) | (1<<CS12)|(1<<CS10);  // CTC, prescaler 1024
-    OCR1A   = F_CPU/1024/2 - 1;              // 2Hz (500ms intervals)
+    OCR1A   = F_CPU/1024/1 - 1;              // 1Hz (1s intervals)
     TIMSK1 |= (1<<OCIE1A);
 }
 
-/**
- * Timer ISR - Central timing coordinator
- * Runs every 500ms and sets flags for various tasks
- */
+// Timer ISR - Central timing coordinator: Runs every 1s and sets flags for various tasks
 ISR(TIMER1_COMPA_vect) {
-    // Display update (every 500ms)
-    if (++display_timer >= DISPLAY_UPDATE_INTERVAL) {
-        display_timer = 0;
-        update_display_flag = 1;
-    }
-    
-    // Error checking (every 2 seconds)
+    // Sensor reading and error checking (every 2 seconds)
     if (++error_timer >= ERROR_CHECK_INTERVAL) {
         error_timer = 0;
         check_errors_flag = 1;
@@ -190,7 +188,7 @@ ISR(TIMER1_COMPA_vect) {
         if (++cycle_timer >= SENSOR_CYCLE_INTERVAL) {
             cycle_timer = 0;
             current_sensor = (current_sensor + 1) % SENSOR_COUNT;
-            update_display_flag = 1;  // Force display update
+            update_display_flag = 1;  // Trigger display update
         }
     }
 }
@@ -199,11 +197,9 @@ ISR(TIMER1_COMPA_vect) {
 // SENSOR READING FUNCTIONS
 // =============================================================================
 
-void read_all_sensors(void) {
-    // Read ADC sensors
+void read_adc_sensors(void) {
     sensor_data.light_value = adc_read(SENSOR_LIGHT);
     sensor_data.soil_value = adc_read(SENSOR_SOIL);
-    
     // DHT11 reading is handled separately due to timing requirements
 }
 
@@ -214,10 +210,8 @@ void read_dht11_sensor(void) {
         sensor_data.temperature = temp;
         sensor_data.humidity = humidity;
         sensor_data.dht_valid = 1;
-        uart_putstring("DHT11: OK\r\n");
     } else {
         sensor_data.dht_valid = 0;
-        uart_putstring("DHT11: FAIL\r\n");
     }
 }
 
@@ -225,46 +219,49 @@ void read_dht11_sensor(void) {
 // ERROR DETECTION SYSTEM
 // =============================================================================
 
-error_code_t check_sensor_errors(void) {
-    // Check soil moisture
+void check_sensor_errors(void) {
+    error_code_t previous_error = current_error;  //Store previous error state
+    
     if (sensor_data.soil_value > SOIL_MAX) {
-        return ERROR_TOO_WET;
+        current_error = ERROR_TOO_WET;
+    } else if (sensor_data.soil_value < SOIL_MIN) {
+        current_error = ERROR_TOO_DRY;
+    } else if (sensor_data.light_value < (1023 - LIGHT_MAX)) {
+        current_error = ERROR_TOO_BRIGHT;
+    } else if (sensor_data.dht_valid && sensor_data.temperature > TEMP_MAX) {
+        current_error = ERROR_TOO_HOT;
+    } else {
+        current_error = ERROR_NONE; 
     }
-    if (sensor_data.soil_value < SOIL_MIN) {
-        return ERROR_TOO_DRY;
-    }
+
+    if (current_error != previous_error) update_display_flag = 1; // Trigger display update if error state changed
     
-    // Check light levels
-    if (sensor_data.light_value < (1023 - LIGHT_MAX)) {
-        return ERROR_TOO_BRIGHT;
+    // Disable auto-cycling when error occurs
+    if (current_error != ERROR_NONE) {
+        auto_cycle_enabled = 0;
+        cycle_timer = 0;
     }
-    
-    // Check temperature
-    if (sensor_data.dht_valid && sensor_data.temperature > TEMP_MAX) {
-        return ERROR_TOO_HOT;
-    }
-    
-    // Check DHT11 sensor status
-    if (!sensor_data.dht_valid) {
-        return ERROR_DHT_FAIL;
-    }
-    
-    return ERROR_NONE;
 }
 
 // =============================================================================
-// LED CONTROL SYSTEM  
+// LED AND BUZZER CONTROL SYSTEM  
 // =============================================================================
 
-void update_led_and_buzzer_status(void) {
+void buzzer_beep(void) {
+    for(uint16_t i = 0; i < 200; i++) {
+        PORTC |= (1 << BUZZER);   // High
+        _delay_us(10);           // 500 microseconds
+        PORTC &= ~(1 << BUZZER);  // Low
+        _delay_us(500);           // 500 microseconds
+    }
+}
+
+void update_led_and_buzzer(void) {
     if (current_error != ERROR_NONE) {
-        // Error state: Red ON, Blue OFF
+        // Error state: Red ON, Blue OFF, Buzzer ON
         PORTD |= (1 << LED_RED);
         PORTD &= ~(1 << LED_GREEN);
-        // Beep if there’s a non‐zero error
-        if (current_error != ERROR_NONE) {
-            buzzer_beep_ms(); // 200 ms beep
-        }
+        buzzer_beep();
     } else {
         // Normal state: Blue ON, Red OFF
         PORTD |= (1 << LED_GREEN);
@@ -276,13 +273,6 @@ void update_led_and_buzzer_status(void) {
 // LCD DISPLAY FUNCTIONS
 // =============================================================================
 
-void lcd_clear_and_home(void) {
-    lcd_putcmd(LCD_CLEAR);
-    // Small delay for LCD processing (unavoidable for LCD commands)
-    _delay_ms(2);
-    lcd_putcmd(LCD_SET_CURSOR);
-}
-
 void display_error(error_code_t error) {
     const char* error_messages[] = {
         "No Error",
@@ -293,61 +283,44 @@ void display_error(error_code_t error) {
         "DHT11 Fail"
     };
     
-    lcd_clear_and_home();
-    lcd_puts((uint8_t*)"ERROR");
-    lcd_putcmd(LCD_SET_CURSOR | SECOND_ROW);
-    
-    if (error < sizeof(error_messages)/sizeof(error_messages[0])) {
-        lcd_puts((uint8_t*)error_messages[error]);
-    } else {
-        lcd_puts((uint8_t*)"Unknown");
-    }
+    lcd_print_rows((uint8_t*)"Error Detected:", (uint8_t*)error_messages[error]);
 }
 
 void display_light_sensor(void) {
     uint16_t light_pct = (1023 - sensor_data.light_value) * 100UL / 1023;
-    char buffer[17];
-    
-    lcd_clear_and_home();
-    lcd_puts((uint8_t*)"Ambient Light:");
-    lcd_putcmd(LCD_SET_CURSOR | SECOND_ROW);
-    snprintf(buffer, sizeof(buffer), "%u%%", light_pct);
-    lcd_puts((uint8_t*)buffer);
+    char second_row[17];
+    snprintf(second_row, sizeof(second_row), "%u%%", light_pct);
+    lcd_print_rows((uint8_t*)"Ambient Light:", (uint8_t*)second_row);
 }
 
 void display_soil_sensor(void) {
-    uint16_t soil_val = sensor_data.soil_value;
-    if (soil_val < SOIL_MIN) soil_val = SOIL_MIN;
-    else if (soil_val > SOIL_MAX) soil_val = SOIL_MAX;
-    
-    uint16_t soil_pct = (soil_val - SOIL_MIN) * 100UL / (SOIL_MAX - SOIL_MIN);
-    char buffer[17];
-    
-    lcd_clear_and_home();
-    lcd_puts((uint8_t*)"Soil Humidity:");
-    lcd_putcmd(LCD_SET_CURSOR | SECOND_ROW);
-    snprintf(buffer, sizeof(buffer), "%u%%", soil_pct);
-    lcd_puts((uint8_t*)buffer);
+    uint16_t soil_value = sensor_data.soil_value;
+    char second_row[17];
+    if (soil_value < SOIL_MIN) {
+        soil_value = SOIL_MIN;
+    } else if (soil_value > SOIL_MAX) { 
+        soil_value = SOIL_MAX;
+    }
+    uint16_t soil_pct = (soil_value - SOIL_MIN) * 100UL / (SOIL_MAX - SOIL_MIN);
+    snprintf(second_row, sizeof(second_row), "%u%%", soil_pct);
+    lcd_print_rows((uint8_t*)"Soil Moisture:", (uint8_t*)second_row);
 }
 
 void display_dht_sensor(void) {
-    char buffer[17];
+    char first_row[17];
+    char second_row[17];
     
-    lcd_clear_and_home();
     if (sensor_data.dht_valid) {
-        snprintf(buffer, sizeof(buffer), "Temp: %u%cC", sensor_data.temperature, 223); // 223 is the degree symbol in ASCII
-        lcd_puts((uint8_t*)buffer);
-        lcd_putcmd(LCD_SET_CURSOR | SECOND_ROW);
-        snprintf(buffer, sizeof(buffer), "Humidity: %u%%", sensor_data.humidity);
-        lcd_puts((uint8_t*)buffer);
+        snprintf(first_row, sizeof(first_row), "Temp: %u%cC", sensor_data.temperature, 223); // 223 is the degree symbol in ASCII
+        snprintf(second_row, sizeof(second_row), "Humidity: %u%%", sensor_data.humidity);
+        lcd_print_rows((uint8_t*)first_row, (uint8_t*)second_row);
     } else {
-        lcd_puts((uint8_t*)"DHT11 Sensor:");
-        lcd_putcmd(LCD_SET_CURSOR | SECOND_ROW);
-        lcd_puts((uint8_t*)"Not Available");
+        lcd_print_rows((uint8_t*)"DHT11 Sensor:", (uint8_t*)"Not Available");
     }
 }
 
 void update_display(void) {
+    // Display error if any
     if (current_error != ERROR_NONE) {
         display_error(current_error);
         return;
@@ -436,66 +409,54 @@ void system_init(void) {
     timer1_init();
     interrupts_init();
     
-    // Enable global interrupts
-    sei();
+    sei();    // Enable global interrupts
     
-    // System startup message
-    uart_putstring("\r\n=== Plant Monitor System Started ===\r\n");
-    uart_putstring("Features: Auto-cycle, Error detection, Multi-sensor\r\n");
-    uart_putstring("Sensors: Light, Soil, DHT11 (Temp/Humidity)\r\n\r\n");
+    uart_putstring("\r\n=== Plant Monitor System Started ===\r\n");     // System startup message
+    uart_putstring("System initialized. Starting sensor readings...\r\n");
+    
+    lcd_clear_and_home();
+    lcd_print_rows((uint8_t*)"Smart Plant",(uint8_t*)"Monitor");
 }
 
-void buzzer_beep_ms(void) {
-    for(uint16_t i = 0; i < 200; i++) {
-        PORTC |= (1 << BUZZER);   // High
-        _delay_us(10);           // 500 microseconds
-        PORTC &= ~(1 << BUZZER);  // Low
-        _delay_us(500);           // 500 microseconds
-    }
-}
+
 
 // =============================================================================
 // MAIN PROGRAM LOOP
 // =============================================================================
 
 int main(void) {
-    // Initialize system
-    system_init();
-    
-    // Initial sensor reading
-    read_all_sensors();
-    
-    // Give DHT11 time to stabilize (unavoidable initial delay)
-    _delay_ms(2000);
-    read_dht11_sensor();
+    system_init();      // Initialize system
+    _delay_ms(2000);    // Give DHT11 time to stabilize
+    read_adc_sensors();     // Initial soil and light sensors reading
+    read_dht11_sensor();    // Initial dht11 sensor reading
     
     // Main event loop
     while (1) {
-        // Handle DHT11 reading (time-critical, has priority)
+        // Handle DHT11 reading (every 4 seconds)
         if (read_dht_flag) {
             read_dht_flag = 0;
             read_dht11_sensor();
         }
         
-        // Handle error checking
+        // Handle soil and light sensor reading and error checking (every 2 seconds)
         if (check_errors_flag) {
             check_errors_flag = 0;
-            read_all_sensors();  // Update sensor readings
-            current_error = check_sensor_errors();
-            update_led_and_buzzer_status();
+            read_adc_sensors();     // Update sensor readings
+            check_sensor_errors();
+            update_led_and_buzzer();
             uart_print_sensor_data();  // Debug output
-            
-            // Re-enable auto-cycling if error is cleared
-            if (current_error == ERROR_NONE && !auto_cycle_enabled) {
-                auto_cycle_enabled = 1;
-                cycle_timer = 0;
-            }
         }
-        
-        // Handle display updates
+
+        // Update display if needed
         if (update_display_flag) {
             update_display_flag = 0;
             update_display();
+        }
+
+        // Re-enable auto-cycling if error is cleared
+        if (current_error == ERROR_NONE && !auto_cycle_enabled) {
+            auto_cycle_enabled = 1;
+            cycle_timer = 0;
         }
         
         // Small delay to prevent busy-waiting

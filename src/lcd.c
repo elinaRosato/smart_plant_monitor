@@ -70,6 +70,7 @@ void lcd_init(void) {
     /* 40 us delay (min) */
     _delay_us(80);
 }
+
 void lcd_puts(uint8_t *s) {
     /* Character counter */
     // volatile uint8_t i = 0;
@@ -135,4 +136,16 @@ void lcd_clear_row(uint8_t row) {
     lcd_puts(clear_row);
 } /* lcd_clear_row() */
 
+void lcd_clear_and_home(void) {
+    lcd_putcmd(LCD_CLEAR);
+    _delay_ms(2); // Small delay for LCD processing
+    lcd_putcmd(LCD_SET_CURSOR);
+}
+
+void lcd_print_rows(uint8_t* first_row, uint8_t* second_row) {
+    lcd_clear_and_home();
+    lcd_puts((uint8_t*)first_row);
+    lcd_putcmd(LCD_SET_CURSOR | SECOND_ROW);
+    lcd_puts((uint8_t*)second_row);
+}
 /* End lcd.c */
