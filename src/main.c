@@ -40,7 +40,7 @@
 #define SENSOR_SOIL    1    // ADC1
 
 // Sensor thresholds
-#define SOIL_MIN        50      // Too dry threshold  
+#define SOIL_MIN        100      // Too dry threshold  
 #define SOIL_MAX        700     // Too wet threshold  
 #define LIGHT_MIN       200     // Too dark threshold  
 #define LIGHT_MAX       1000    // Too bright threshold
@@ -250,7 +250,7 @@ void check_sensor_errors(void) {
 void buzzer_beep(void) {
     for(uint16_t i = 0; i < 200; i++) {
         PORTC |= (1 << BUZZER);   // High
-        _delay_us(10);           // 500 microseconds
+        _delay_us(10);           // 10 microseconds
         PORTC &= ~(1 << BUZZER);  // Low
         _delay_us(500);           // 500 microseconds
     }
@@ -279,8 +279,7 @@ void display_error(error_code_t error) {
         "Too Bright",
         "Too Hot", 
         "Too Wet",
-        "Too Dry",
-        "DHT11 Fail"
+        "Too Dry"
     };
     
     lcd_print_rows((uint8_t*)"Error Detected:", (uint8_t*)error_messages[error]);
@@ -416,6 +415,11 @@ void system_init(void) {
     
     lcd_clear_and_home();
     lcd_print_rows((uint8_t*)"Smart Plant",(uint8_t*)"Monitor");
+
+    PORTD |= (1 << LED_GREEN);  // Turn on green LED to indicate system is ready
+    PORTD |= (1 << LED_RED);    // Turn on red LED to indicate system is ready
+    _delay_ms(2000);
+    PORTD &= ~((1 << LED_GREEN) | (1 << LED_RED)); // Turn off LEDs after initialization
 }
 
 
